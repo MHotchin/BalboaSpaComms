@@ -8,4 +8,5 @@ Currently at Proof of Concept stage.
 	- control pumps, lights
 	- set time
 	- set temp, temp scale and temp range.
- - UI is non-eistent at this stage.  Program is a console mode test framework I'm using to test the comms library.
+ - UI is non-existent at this stage.  Program is a console mode test framework I'm using to test the comms library.
+ - Works over local network ONLY, Windows ONLY at this point.
