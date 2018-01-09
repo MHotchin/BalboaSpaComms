@@ -64,7 +64,6 @@ BOOL CSpaComms::StartMonitor(void)
 
 	if (iResult == INVALID_SOCKET)
 	{
-		wprintf_s(L"Unable to connect().\n");
 		return FALSE;
 	}
 	uintptr_t hThread = _beginthreadex(NULL, 0, CSpaComms::MonitorThreadProc, this, 0, NULL);
@@ -99,6 +98,7 @@ CSpaComms::MonitorThreadProc(
 const BYTE byMessageTerminator = 0x7e;
 
 #ifdef _DEBUG
+//  Force a small size to exercize buffer stitching code
 const size_t uiRecvBufferSize = 16;
 #else
 const size_t uiRecvBufferSize = 64;
@@ -116,8 +116,8 @@ CSpaComms::MonitorThreadProc()
 	tvTimeout.tv_sec = 1;
 	tvTimeout.tv_usec = 0;
 	
-	CByteArray LeftOvers(1024);
-
+	CByteArray LeftOvers;
+	LeftOvers.reserve(1024);
 
 	while (!m_fShutDown)
 	{
@@ -149,6 +149,8 @@ CSpaComms::MonitorThreadProc()
 
 				// Locate beginning of message.  We expect it to be at the begining of the buffer,
 				// but let's make sure, shall we?
+				_ASSERT(*pByte == byMessageTerminator);
+
 				while (pByte != LeftOvers.end() && *pByte != byMessageTerminator)
 				{
 					pByte++;
@@ -189,7 +191,6 @@ CSpaComms::MonitorThreadProc()
 						break;
 					}
 				}
-//				DumpHexData(LeftOvers);
 			}
 		}
 	}
@@ -219,6 +220,7 @@ CSpaComms::ProcessMessage(
 
 	UINT uiSize = Message[1];
 
+	//  Message should be the payload + 2 terminators
 	_ASSERT(uiSize == Message.size() - 2);
 
 	//  CRC is appended, so don't include that byte when re-calculating.
@@ -232,50 +234,7 @@ CSpaComms::ProcessMessage(
 	
 	switch (uiMessageID)
 	{
-	case msStatus:
-		   
-		if (Message.size() == 31)
-		{
-			if (!m_fCoalesce || (Message != m_PreviousStatusMessage))
-			{
-				if (m_fCoalesce)
-				{
-					m_PreviousStatusMessage = Message;
-				}
-
-				StatusMessage StatusMessage;
-
-				StatusMessage.m_RawMessage = Message;
-
-				StatusMessage.m_Time.m_Hour = Message[8];
-				StatusMessage.m_Time.m_Minute = Message[9];
-				StatusMessage.m_f24Time = ((Message[14] & 0x02) != 0);
-
-				StatusMessage.m_CurrentTemp = Message[7];
-				StatusMessage.m_SetPointTemp = Message[25];
-				StatusMessage.m_TempScale = (Message[14] & 0x01) ? tsCelsiusX2 : tsFahrenheight;
-
-				StatusMessage.m_HeatRange = (Message[15] & 0x04) ? hrHigh : hrLow;
-				StatusMessage.m_HeatingMode = static_cast<HeatingMode>(Message[10] & 0x03);
-
-				StatusMessage.m_Pump1Status = static_cast<PumpStatus>(Message[16] & 0x03);
-				StatusMessage.m_Pump2Status = static_cast<PumpStatus>((Message[16] >> 2) & 0x03);
-
-				StatusMessage.m_fPriming = ((Message[6] & 0x01) != 0);
-				StatusMessage.m_fHeating = ((Message[15] & 0x30) != 0);
-				StatusMessage.m_fCircPumpRunning = ((Message[18] & 0x02) != 0);
-				StatusMessage.m_fLights = ((Message[19] & 0x03) != 0);
-
-				m_pCallback->ProcessStatusMessage(StatusMessage);
-			}
-		}
-		else
-		{
-			m_pCallback->ProcessUnknownMessageRaw(Message);
-		}
-
-		break;
-
+	
 	case msConfigResponse:
 		if (Message.size() == 32)
 		{
@@ -373,6 +332,50 @@ CSpaComms::ProcessMessage(
 
 	case msSetTempRange:
 		//  Unknown contents
+		break;
+
+
+	case msStatus:
+		if (Message.size() == 31)
+		{
+			if (!m_fCoalesce || (Message != m_PreviousStatusMessage))
+			{
+				if (m_fCoalesce)
+				{
+					m_PreviousStatusMessage = Message;
+				}
+
+				StatusMessage StatusMessage;
+
+				StatusMessage.m_RawMessage = Message;
+
+				StatusMessage.m_Time.m_Hour = Message[8];
+				StatusMessage.m_Time.m_Minute = Message[9];
+				StatusMessage.m_f24Time = ((Message[14] & 0x02) != 0);
+
+				StatusMessage.m_CurrentTemp = Message[7];
+				StatusMessage.m_SetPointTemp = Message[25];
+				StatusMessage.m_TempScale = (Message[14] & 0x01) ? tsCelsiusX2 : tsFahrenheight;
+
+				StatusMessage.m_HeatRange = (Message[15] & 0x04) ? hrHigh : hrLow;
+				StatusMessage.m_HeatingMode = static_cast<HeatingMode>(Message[10] & 0x03);
+
+				StatusMessage.m_Pump1Status = static_cast<PumpStatus>(Message[16] & 0x03);
+				StatusMessage.m_Pump2Status = static_cast<PumpStatus>((Message[16] >> 2) & 0x03);
+
+				StatusMessage.m_fPriming = ((Message[6] & 0x01) != 0);
+				StatusMessage.m_fHeating = ((Message[15] & 0x30) != 0);
+				StatusMessage.m_fCircPumpRunning = ((Message[18] & 0x02) != 0);
+				StatusMessage.m_fLights = ((Message[19] & 0x03) != 0);
+
+				m_pCallback->ProcessStatusMessage(StatusMessage);
+			}
+		}
+		else
+		{
+			m_pCallback->ProcessUnknownMessageRaw(Message);
+		}
+
 		break;
 
 	default:
