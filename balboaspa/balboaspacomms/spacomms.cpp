@@ -19,8 +19,8 @@ CSpaComms::CSpaComms(
 	IMonitorCallback *pCallback,
 	BOOL fCoalesce)
 	: m_SpaAddress(SpaAddress), m_hMonitorThread(0), m_fShutDown(FALSE),
-		m_SpaSocket(INVALID_SOCKET), m_fCoalesce(fCoalesce),
-		m_PreviousStatusMessage(64), m_pCallback(pCallback)
+	m_SpaSocket(INVALID_SOCKET), m_fCoalesce(fCoalesce),
+	m_PreviousStatusMessage(64), m_pCallback(pCallback)
 {
 	F_CRC_InicializaTabla();
 }
@@ -95,11 +95,15 @@ CSpaComms::MonitorThreadProc(
 	return ((CSpaComms *)pParam)->MonitorThreadProc();
 }
 
+
+//Each message requires MessageTerminators, MessageLength, MessageId (3 bytes), CrcByte
+//  MT ML MI MI MI ... CB MT
+const UINT cMessageOverhead = 7;
 const BYTE byMessageTerminator = 0x7e;
 
 #ifdef _DEBUG
 //  Force a small size to exercize buffer stitching code
-const size_t uiRecvBufferSize = 16;
+const size_t uiRecvBufferSize = 15;
 #else
 const size_t uiRecvBufferSize = 64;
 #endif
@@ -115,7 +119,7 @@ CSpaComms::MonitorThreadProc()
 
 	tvTimeout.tv_sec = 1;
 	tvTimeout.tv_usec = 0;
-	
+
 	CByteArray LeftOvers;
 	LeftOvers.reserve(1024);
 
@@ -133,7 +137,7 @@ CSpaComms::MonitorThreadProc()
 			RecvBuffer.resize(uiRecvBufferSize);
 
 			iResult = recv(m_SpaSocket, (char *)&*RecvBuffer.begin(), (int)RecvBuffer.size(), 0);
-			
+
 			if (iResult == SOCKET_ERROR)
 			{
 				//  ??
@@ -145,49 +149,47 @@ CSpaComms::MonitorThreadProc()
 				//  Add our current input to whatever was leftover from last-time.
 				LeftOvers.insert(LeftOvers.end(), RecvBuffer.begin(), RecvBuffer.end());
 
-				auto pByte = LeftOvers.begin();
+				auto pByte = LeftOvers.cbegin();
 
 				// Locate beginning of message.  We expect it to be at the begining of the buffer,
 				// but let's make sure, shall we?
 				_ASSERT(*pByte == byMessageTerminator);
 
-				while (pByte != LeftOvers.end() && *pByte != byMessageTerminator)
+				while (pByte != LeftOvers.cend() && *pByte != byMessageTerminator)
 				{
 					pByte++;
 				}
-	
-				if (pByte != LeftOvers.begin())
+
+				if (pByte != LeftOvers.cbegin())
 				{
-					
-					LeftOvers.erase(LeftOvers.begin(), pByte);
+					LeftOvers.erase(LeftOvers.cbegin(), pByte);
 				}
 
 				//  May have multiple messages now in the buffer.
-				while (LeftOvers.size() > 0)
+				while (LeftOvers.size() >= cMessageOverhead)
 				{
-					pByte = LeftOvers.begin();
+					pByte = LeftOvers.cbegin();
 					pByte++;
 
-					//  Look for the *end* of the message...
-					while (pByte != LeftOvers.end() && *pByte != byMessageTerminator)
-					{
-						pByte++;
-					}
+					//  Get size of payload
+					BYTE bySize = *pByte;
 
-					if (pByte != LeftOvers.end() && *pByte == byMessageTerminator)
+					if (LeftOvers.cend() - pByte > bySize)
 					{
-						if (m_pCallback != NULL)
-						{
-							//  Extract complete message, remove from 'LeftOvers', process.
-							CByteArray Message(LeftOvers.begin(), pByte + 1);
+						//  Skip over the payload.
+						pByte += bySize;
 
-							ProcessMessage(Message);
-						}
-						LeftOvers.erase(LeftOvers.begin(), pByte + 1);
+						_ASSERT(*pByte == byMessageTerminator);
+
+						//  Extract complete message, remove from 'LeftOvers', process.
+						CByteArray Message(LeftOvers.cbegin(), pByte + 1);
+
+						ProcessMessage(Message);
+						LeftOvers.erase(LeftOvers.cbegin(), pByte + 1);
 					}
 					else
 					{
-						//  Buffer contains one incomplete message, wait for more input.
+						//  Buffer has one incomplete message.  Wait for more input.
 						break;
 					}
 				}
@@ -224,17 +226,17 @@ CSpaComms::ProcessMessage(
 	_ASSERT(uiSize == Message.size() - 2);
 
 	//  CRC is appended, so don't include that byte when re-calculating.
-	crc MessageCRC = F_CRC_CalculaCheckSum(&Message[1], uiSize-1);
+	crc MessageCRC = F_CRC_CalculaCheckSum(&Message[1], uiSize - 1);
 
 
 	//  Sometimes fails?
 	_ASSERT(MessageCRC == Message[Message.size() - 2]);
 
-	UINT uiMessageID = (Message[2]<<16)+(Message[3]<<8)+Message[4];
-	
+	UINT uiMessageID = (Message[2] << 16) + (Message[3] << 8) + Message[4];
+
 	switch (uiMessageID)
 	{
-	
+
 	case msConfigResponse:
 		if (Message.size() == 32)
 		{
@@ -245,8 +247,8 @@ CSpaComms::ProcessMessage(
 			char szMacAddress[64];
 
 			sprintf_s(szMacAddress, "%02X-%02X-%02X-%02X-%02X-%02X",
-					  Message[uiPayloadStartOffset+3], Message[uiPayloadStartOffset + 4], 
-					  Message[uiPayloadStartOffset + 5], Message[uiPayloadStartOffset + 6], 
+					  Message[uiPayloadStartOffset + 3], Message[uiPayloadStartOffset + 4],
+					  Message[uiPayloadStartOffset + 5], Message[uiPayloadStartOffset + 6],
 					  Message[uiPayloadStartOffset + 7], Message[uiPayloadStartOffset + 8]);
 
 			ConfigResponseMessage.m_strMACAddress = szMacAddress;
@@ -290,7 +292,7 @@ CSpaComms::ProcessMessage(
 		if (Message.size() == 28)
 		{
 			VersionInfoResponseMessage VersionInfoResponse;
-			
+
 			VersionInfoResponse.m_RawMessage = Message;
 
 			VersionInfoResponse.m_strModelName = string((const char *)&Message[uiPayloadStartOffset + 4], 8);
@@ -313,9 +315,8 @@ CSpaComms::ProcessMessage(
 		}
 
 		break;
-		
+
 	case msControlConfig2:
-		//break;  //  Contents unknown, just skip message entirely.
 		if (Message.size() == 13)
 		{
 			ControlConfig2ResponseMessage ControlConfig2ResponseMessage;
@@ -330,9 +331,9 @@ CSpaComms::ProcessMessage(
 		}
 		break;
 
-	case msSetTempRange:
-		//  Unknown contents
-		break;
+	//case msSetTempRange:
+	//	//  Unknown contents
+	//	break;
 
 
 	case msStatus:
@@ -384,7 +385,7 @@ CSpaComms::ProcessMessage(
 }
 
 
-BOOL 
+BOOL
 CSpaComms::SendSpaMessage(
 	const CByteArray &Message)
 {
@@ -395,7 +396,7 @@ CSpaComms::SendSpaMessage(
 	int iResult = 0;
 
 	iResult = send(m_SpaSocket, (const char *)&Message[0], (int)Message.size(), 0);
-	
+
 	return (iResult == Message.size());
 }
 
@@ -412,9 +413,7 @@ enum SpaCommandMessageID
 	msControlConfigRequest = 0x0abf22
 };
 
-//Each message requires MessageTerminators, MessageLength, MessageId (3 bytes), CrcByte
-//  MT ML MI MI MI ... CB MT
-const UINT cMessageOverhead = 7;
+
 
 void
 FillInMessageOverhead(
@@ -434,7 +433,7 @@ FillInMessageOverhead(
 }
 
 
-void 
+void
 FillInMessageCRC(
 	CByteArray &Message)
 {
@@ -458,7 +457,7 @@ CSpaComms::SendConfigRequest(void)
 }
 
 
-BOOL 
+BOOL
 CSpaComms::SendFilterConfigRequest(void)
 {
 	CByteArray FilterConfigRequestMessage;
@@ -508,7 +507,7 @@ BOOL CSpaComms::SendControlConfig2Request(void)
 }
 
 BOOL CSpaComms::SendSetTempRequest(
-	UINT uiTemp, 
+	UINT uiTemp,
 	TempScale ts)
 {
 	CByteArray SetTempRequestMessage;
