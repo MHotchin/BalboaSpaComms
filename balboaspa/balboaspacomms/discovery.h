@@ -1,6 +1,8 @@
 #pragma once
 
 
+struct sockaddr_in;
+
 class CSpaAddress
 {
 public:

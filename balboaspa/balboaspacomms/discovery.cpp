@@ -9,6 +9,7 @@
 const u_short usDiscoveryPort = 30303;
 const char *szDiscoveryMessage = "Discovery: Who is out there?";
 const char *szSignature = "BWGSPA         \r\n00-15-27-";
+const UINT uiMacOffset = 17;  //  Offset of mac address in string above.
 
 CSpaAddress::CSpaAddress(
 	const CSpaAddress &Source)
@@ -77,19 +78,20 @@ BOOL DiscoverSpas(SpaAddressVector &Spas)
 	}
 
 	//  If there are multiple spas, we can get more than one response.
-	fd_set fsIncoming;
+	
 	timeval tvTimeout;
-
-	FD_ZERO(&fsIncoming);
-	FD_SET(ConnectSocket, &fsIncoming);
 
 	tvTimeout.tv_sec = 1;
 	tvTimeout.tv_usec = 0;
 
 	do
 	{
+		fd_set fsIncoming;
+
+		FD_ZERO(&fsIncoming);
+		FD_SET(ConnectSocket, &fsIncoming);
+
 		iResult = select(0, &fsIncoming, NULL, NULL, &tvTimeout);
-		tvTimeout.tv_sec = 1;
 
 		if (iResult == SOCKET_ERROR)
 		{
@@ -119,7 +121,8 @@ BOOL DiscoverSpas(SpaAddressVector &Spas)
 			}
 			else
 			{
-				CSpaAddress NewSpa(saFrom, string(&RecvBuffer[17], strlen(&RecvBuffer[16]) - 3));
+				CSpaAddress NewSpa(saFrom, string(&RecvBuffer[uiMacOffset], 
+												  strlen(&RecvBuffer[uiMacOffset]) - 2));
 
 				Spas.push_back(NewSpa);
 			}

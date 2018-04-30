@@ -26,9 +26,13 @@ public:
 	BOOL SendControlConfig2Request(void);
 	BOOL SendSetTempRequest(UINT, TempScale);
 	BOOL SendSetTempScaleRequest(TempScale);
-
+	BOOL SendSetFilterConfigRequest(const FilterConfigResponseMessage &);
 	
 private:
+
+	struct sPrivateData;
+
+	std::unique_ptr<sPrivateData> m_pData;
 
 	static  unsigned int __stdcall MonitorThreadProc(void *);
 	unsigned int MonitorThreadProc(void);
@@ -39,7 +43,7 @@ private:
 	CSpaAddress m_SpaAddress;
 	HANDLE m_hMonitorThread;
 	BOOL m_fShutDown;
-	SOCKET m_SpaSocket;
+	//SOCKET m_SpaSocket;
 	BOOL m_fCoalesce;
 	CByteArray m_PreviousStatusMessage;
 

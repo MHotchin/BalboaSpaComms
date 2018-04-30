@@ -1,7 +1,5 @@
 
 #include "stdafx.h"
-
-
 #include "Discovery.h"
 #include "MonitorCallback.h"
 #include "SpaComms.h"
@@ -14,13 +12,21 @@ typedef uint8_t crc;
 
 const u_short usConnectionPort = 4257;
 
+struct CSpaComms::sPrivateData
+{
+	sPrivateData(SOCKET s);
+	SOCKET m_SpaSocket;
+};
+
+
 CSpaComms::CSpaComms(
 	const CSpaAddress &SpaAddress,
 	IMonitorCallback *pCallback,
 	BOOL fCoalesce)
 	: m_SpaAddress(SpaAddress), m_hMonitorThread(0), m_fShutDown(FALSE),
-	m_SpaSocket(INVALID_SOCKET), m_fCoalesce(fCoalesce),
-	m_PreviousStatusMessage(64), m_pCallback(pCallback)
+	m_fCoalesce(fCoalesce),
+	m_PreviousStatusMessage(64), m_pCallback(pCallback),
+	m_pData(std::make_unique<CSpaComms::sPrivateData>(INVALID_SOCKET))
 {
 	F_CRC_InicializaTabla();
 }
@@ -28,11 +34,6 @@ CSpaComms::CSpaComms(
 CSpaComms::~CSpaComms()
 {
 	EndMonitor();
-
-	if (m_SpaSocket != INVALID_SOCKET)
-	{
-		closesocket(m_SpaSocket);
-	}
 
 	if (m_pCallback != NULL)
 	{
@@ -46,34 +47,36 @@ BOOL CSpaComms::StartMonitor(void)
 {
 	if (m_hMonitorThread != 0)
 	{
+		//  Already running
 		return FALSE;
 	}
 
-	m_SpaSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	m_pData->m_SpaSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	SOCKET iResult = INVALID_SOCKET;
 
-	if (m_SpaSocket == INVALID_SOCKET)
+	if (m_pData->m_SpaSocket == INVALID_SOCKET)
 	{
+		//  We don't really expect to hit this case.
 		return FALSE;
 	}
 
 	sockaddr_in SpaAddressPort = m_SpaAddress.m_SpaAddress;
 	SpaAddressPort.sin_port = htons(usConnectionPort);
 
-	iResult = connect(m_SpaSocket, (const sockaddr *)&SpaAddressPort, sizeof(SpaAddressPort));
+	iResult = connect(m_pData->m_SpaSocket, (const sockaddr *)&SpaAddressPort, sizeof(SpaAddressPort));
 
 	if (iResult == INVALID_SOCKET)
 	{
+		//  Unable to connect to Spa - perhaps already in use by another app?
+		int iError = WSAGetLastError();
+		closesocket(m_pData->m_SpaSocket);
+		m_pData->m_SpaSocket = INVALID_SOCKET;
+
 		return FALSE;
 	}
-	uintptr_t hThread = _beginthreadex(NULL, 0, CSpaComms::MonitorThreadProc, this, 0, NULL);
+	m_hMonitorThread = (HANDLE) _beginthreadex(NULL, 0, CSpaComms::MonitorThreadProc, this, 0, NULL);
 
-	if (hThread != 0)
-	{
-		m_hMonitorThread = (HANDLE)hThread;
-	}
-
-	return (hThread != 0);
+	return (m_hMonitorThread != 0);
 }
 
 
@@ -85,6 +88,13 @@ void CSpaComms::EndMonitor()
 		WaitForSingleObject(m_hMonitorThread, INFINITE);
 		CloseHandle(m_hMonitorThread);
 		m_hMonitorThread = 0;
+		m_fShutDown = FALSE;
+	}
+
+	if (m_pData->m_SpaSocket != INVALID_SOCKET)
+	{
+		closesocket(m_pData->m_SpaSocket);
+		m_pData->m_SpaSocket = INVALID_SOCKET;
 	}
 }
 
@@ -105,18 +115,18 @@ const BYTE byMessageTerminator = 0x7e;
 //  Force a small size to exercize buffer stitching code
 const size_t uiRecvBufferSize = 15;
 #else
-const size_t uiRecvBufferSize = 64;
+const size_t uiRecvBufferSize = 256;
 #endif
 
 unsigned int
 CSpaComms::MonitorThreadProc()
 {
-	fd_set fsIncoming;
+	
 	timeval tvTimeout;
-
-	FD_ZERO(&fsIncoming);
-	FD_SET(m_SpaSocket, &fsIncoming);
-
+	UINT uiTimeouts = 0;
+	
+	//  We wait for incoming messages 1 sec at a time.
+	//  Spa is usually very chatty, should rarely timeout.
 	tvTimeout.tv_sec = 1;
 	tvTimeout.tv_usec = 0;
 
@@ -125,22 +135,34 @@ CSpaComms::MonitorThreadProc()
 
 	while (!m_fShutDown)
 	{
+		fd_set fsIncoming;
+
+		FD_ZERO(&fsIncoming);
+		FD_SET(m_pData->m_SpaSocket, &fsIncoming);
+
 		CByteArray RecvBuffer(uiRecvBufferSize);
 
 		int iResult = select(0, &fsIncoming, NULL, NULL, &tvTimeout);
 
 		if (iResult == SOCKET_ERROR)
-		{}
+		{
+			int iError = WSAGetLastError();
+			m_pCallback->OnFatalError();
+			return 0;
+		}
 
 		if (iResult > 0)
 		{
+			uiTimeouts = 0;
 			RecvBuffer.resize(uiRecvBufferSize);
 
-			iResult = recv(m_SpaSocket, (char *)&*RecvBuffer.begin(), (int)RecvBuffer.size(), 0);
+			iResult = recv(m_pData->m_SpaSocket, (char *)&*RecvBuffer.begin(), (int)RecvBuffer.size(), 0);
 
 			if (iResult == SOCKET_ERROR)
 			{
-				//  ??
+				int iError = WSAGetLastError();
+				m_pCallback->OnFatalError();
+				return 0;
 			}
 			else
 			{
@@ -184,8 +206,8 @@ CSpaComms::MonitorThreadProc()
 						//  Extract complete message, remove from 'LeftOvers', process.
 						CByteArray Message(LeftOvers.cbegin(), pByte + 1);
 
-						ProcessMessage(Message);
 						LeftOvers.erase(LeftOvers.cbegin(), pByte + 1);
+						ProcessMessage(Message);
 					}
 					else
 					{
@@ -193,6 +215,17 @@ CSpaComms::MonitorThreadProc()
 						break;
 					}
 				}
+			}
+		}
+		else
+		{
+			uiTimeouts++;
+			wprintf_s(L"Timeout.\n");
+			
+			if (uiTimeouts >= 5)
+			{
+				m_pCallback->OnFatalError();
+				return 0;
 			}
 		}
 	}
@@ -227,7 +260,6 @@ CSpaComms::ProcessMessage(
 
 	//  CRC is appended, so don't include that byte when re-calculating.
 	crc MessageCRC = F_CRC_CalculaCheckSum(&Message[1], uiSize - 1);
-
 
 	//  Sometimes fails?
 	_ASSERT(MessageCRC == Message[Message.size() - 2]);
@@ -395,7 +427,7 @@ CSpaComms::SendSpaMessage(
 
 	int iResult = 0;
 
-	iResult = send(m_SpaSocket, (const char *)&Message[0], (int)Message.size(), 0);
+	iResult = send(m_pData->m_SpaSocket, (const char *)&Message[0], (int)Message.size(), 0);
 
 	return (iResult == Message.size());
 }
@@ -410,7 +442,8 @@ enum SpaCommandMessageID
 	msSetTempScaleRequest = 0x0abf27,
 	msSetTimeRequest = 0x0abf21,
 	msSetWiFiSettingsRequest = 0x0abf92,
-	msControlConfigRequest = 0x0abf22
+	msControlConfigRequest = 0x0abf22,
+	msSetFilterConfigRequest = 0x0abf23,
 };
 
 
@@ -536,3 +569,30 @@ BOOL CSpaComms::SendSetTempScaleRequest(
 	return 0;
 }
 
+BOOL CSpaComms::SendSetFilterConfigRequest(
+	const FilterConfigResponseMessage &FilterConfig)
+{
+	CByteArray SetFilterConfigRequestMessage;
+
+	FillInMessageOverhead(SetFilterConfigRequestMessage, msSetFilterConfigRequest, 8);
+	SetFilterConfigRequestMessage[uiPayloadStartOffset + 0] = FilterConfig.m_Filter1StartTime.m_Hour;
+	SetFilterConfigRequestMessage[uiPayloadStartOffset + 1] = FilterConfig.m_Filter1StartTime.m_Minute;
+	SetFilterConfigRequestMessage[uiPayloadStartOffset + 2] = FilterConfig.m_uiFilter1Duration / 60;
+	SetFilterConfigRequestMessage[uiPayloadStartOffset + 3] = FilterConfig.m_uiFilter1Duration % 60;
+
+	SetFilterConfigRequestMessage[uiPayloadStartOffset + 4] = FilterConfig.m_Filter2StartTime.m_Hour;
+	SetFilterConfigRequestMessage[uiPayloadStartOffset + 5] = FilterConfig.m_Filter2StartTime.m_Minute;
+	SetFilterConfigRequestMessage[uiPayloadStartOffset + 6] = FilterConfig.m_uiFilter2Duration / 60;
+	SetFilterConfigRequestMessage[uiPayloadStartOffset + 7] = FilterConfig.m_uiFilter2Duration % 60;
+
+	SetFilterConfigRequestMessage[uiPayloadStartOffset + 4] |= FilterConfig.m_fFilter2Enabled ? 0x80 : 0x00;
+
+
+
+
+	return SendSpaMessage(SetFilterConfigRequestMessage);
+}
+
+CSpaComms::sPrivateData::sPrivateData(SOCKET s)
+	: m_SpaSocket(s)
+{}
